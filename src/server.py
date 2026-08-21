@@ -7,7 +7,7 @@ from mcp.types import ToolAnnotations
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant, image, file
 from xai_sdk.tools import web_search as xai_web_search, x_search as xai_x_search, code_execution
-from .utils import encode_image_to_base64, encode_video_to_base64, build_params, XAI_API_KEY, load_history, save_history
+from .utils import encode_image_to_base64, encode_video_to_base64, build_params, usage_footer, XAI_API_KEY, load_history, save_history
 
 mcp = FastMCP(name="Grok MCP Server")
 READONLY = ToolAnnotations(readOnlyHint=True)
@@ -20,9 +20,10 @@ READONLY = ToolAnnotations(readOnlyHint=True)
 async def chat(
     prompt: str,
     session: Optional[str] = None,
-    model: str = "grok-4-1-fast-reasoning",
+    model: str = "grok-4.6",
     system_prompt: Optional[str] = None,
     agent_count: Optional[int] = None,
+    show_usage: bool = False,
 ):
     """Send a text prompt to a Grok model and return its reply.
 
@@ -32,12 +33,13 @@ async def chat(
     Args:
         prompt: User message to send to the model.
         session: Optional session name. Loads and appends history to `chats/{session}.json`.
-        model: Grok model id (default `grok-4-1-fast-reasoning`).
+        model: Grok model id (default `grok-4.6`).
         system_prompt: Optional system instruction prepended to the conversation.
         agent_count: 4 or 16. Only valid with `grok-4.20-multi-agent` for multi-agent research.
+        show_usage: Append a token usage and cost footer to the reply (default False).
 
     Returns:
-        The assistant's reply text.
+        The assistant's reply text, plus a token usage and cost footer when `show_usage` is true.
     """
     history = load_history(session) if session else []
 
@@ -64,7 +66,8 @@ async def chat(
         history.append({"role": "assistant", "content": response.content, "time": datetime.now().strftime("%d.%m.%Y %H:%M:%S")})
         save_history(session, history)
 
-    return response.content
+    footer = usage_footer(response) if show_usage else ""
+    return response.content + footer
 
 
 @mcp.tool(annotations=READONLY)
@@ -168,6 +171,7 @@ async def generate_image(
     image_format: str = "url",
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
+    show_usage: bool = False,
 ):
     """Generate new images or edit existing ones with Grok Imagine.
 
@@ -183,6 +187,7 @@ async def generate_image(
         image_format: `"url"` (default) or `"base64"`.
         aspect_ratio: Aspect ratio like `"16:9"`, `"1:1"`, or `"9:16"`.
         resolution: `"1k"` or `"2k"`.
+        show_usage: Append a token usage and cost footer to the result (default False).
 
     Returns:
         Markdown block with each generated image URL and any revised prompt.
@@ -216,7 +221,8 @@ async def generate_image(
         result.append(f"\n**Image {i}:** {img.url}\n\n")
         if img.prompt and img.prompt != prompt:
             result.append(f"*Revised prompt:* {img.prompt}\n\n")
-    return "\n".join(result)
+    footer = usage_footer(*images) if show_usage else ""
+    return "\n".join(result) + footer
 
 
 @mcp.tool()
@@ -227,15 +233,19 @@ async def generate_video(
     image_url: Optional[str] = None,
     video_path: Optional[str] = None,
     video_url: Optional[str] = None,
+    reference_image_paths: Optional[List[str]] = None,
+    reference_image_urls: Optional[List[str]] = None,
     duration: Optional[int] = None,
     aspect_ratio: Optional[str] = None,
-    resolution: Optional[str] = None
+    resolution: Optional[str] = None,
+    show_usage: bool = False,
 ):
     """Generate or edit videos with Grok Imagine.
 
     Text-to-video by default. Provide an image to animate (image-to-video), or
-    a source video to edit. Only one mode per call. Generation polls
-    synchronously (xAI's default timeout is 10 minutes).
+    a source video to edit. Only one mode per call. Reference images can be
+    added to guide style and subjects. Generation polls synchronously (xAI's
+    default timeout is 10 minutes).
 
     Args:
         prompt: Video description, or the edit instruction for video editing.
@@ -244,9 +254,12 @@ async def generate_video(
         image_url: Public image URL to use as the starting frame.
         video_path: Local video to edit (max 20 MB, .mp4, ≤ 8.7s).
         video_url: Public video URL to edit (.mp4, ≤ 8.7s).
+        reference_image_paths: Local images used as style/subject references.
+        reference_image_urls: Public image URLs used as style/subject references.
         duration: Video length in seconds (1–15, ignored when editing).
         aspect_ratio: Aspect ratio like `"16:9"` or `"9:16"` (ignored when editing).
         resolution: `"480p"` or `"720p"` (ignored when editing).
+        show_usage: Append a token usage and cost footer to the result (default False).
 
     Returns:
         Markdown block with the generated video URL and actual duration.
@@ -271,7 +284,18 @@ async def generate_video(
         params["video_url"] = f"data:video/{ext};base64,{base64_string}"
     elif video_url:
         params["video_url"] = video_url
-    
+
+    refs = []
+    if reference_image_paths:
+        for path in reference_image_paths:
+            base64_string = encode_image_to_base64(path)
+            ext = Path(path).suffix.lower().replace('.', '')
+            refs.append(f"data:image/{ext};base64,{base64_string}")
+    if reference_image_urls:
+        refs.extend(reference_image_urls)
+    if refs:
+        params["reference_image_urls"] = refs
+
     if duration:
         params["duration"] = duration
     if aspect_ratio:
@@ -282,7 +306,8 @@ async def generate_video(
     response = client.video.generate(**params)
     client.close()
 
-    return f"## Generated Video\n\n\n**URL:** {response.url}\n\n\n**Duration:** {response.duration}s\n\n"
+    footer = usage_footer(response) if show_usage else ""
+    return f"## Generated Video\n\n\n**URL:** {response.url}\n\n\n**Duration:** {response.duration}s\n\n" + footer
 
 
 @mcp.tool()
@@ -291,6 +316,7 @@ async def extend_video(
     video_url: str,
     model: str = "grok-imagine-video",
     duration: Optional[int] = None,
+    show_usage: bool = False,
 ):
     """Extend an existing video with a follow-up prompt.
 
@@ -303,6 +329,7 @@ async def extend_video(
         video_url: Public URL of the source video (.mp4, 2–15 s).
         model: Video model (default `grok-imagine-video`).
         duration: Length of the extension in seconds (2–10, default 6).
+        show_usage: Append a token usage and cost footer to the result (default False).
 
     Returns:
         Markdown block with the extended video URL and total duration.
@@ -316,17 +343,19 @@ async def extend_video(
     response = client.video.extend(**params)
     client.close()
 
-    return f"## Extended Video\n\n\n**URL:** {response.url}\n\n\n**Duration:** {response.duration}s\n\n"
+    footer = usage_footer(response) if show_usage else ""
+    return f"## Extended Video\n\n\n**URL:** {response.url}\n\n\n**Duration:** {response.duration}s\n\n" + footer
 
 
 @mcp.tool()
 async def chat_with_vision(
     prompt: str,
     session: Optional[str] = None,
-    model: str = "grok-4-1-fast-reasoning",
+    model: str = "grok-4.6",
     image_paths: Optional[List[str]] = None,
     image_urls: Optional[List[str]] = None,
-    detail: str = "auto"
+    detail: str = "auto",
+    show_usage: bool = False,
 ):
     """Analyze one or more images with a Grok vision model.
 
@@ -336,10 +365,11 @@ async def chat_with_vision(
     Args:
         prompt: Question or instruction about the image(s).
         session: Optional session name for persistent history in `chats/{session}.json`.
-        model: Vision-capable Grok model (default `grok-4-1-fast-reasoning`).
+        model: Vision-capable Grok model (default `grok-4.6`).
         image_paths: Local image file paths to analyze.
         image_urls: Public image URLs to analyze.
         detail: Image detail level. One of `"auto"`, `"low"`, or `"high"`.
+        show_usage: Append a token usage and cost footer to the reply (default False).
 
     Returns:
         The model's textual answer about the image(s).
@@ -378,17 +408,20 @@ async def chat_with_vision(
         history.append({"role": "assistant", "content": response.content, "time": datetime.now().strftime("%d.%m.%Y %H:%M:%S")})
         save_history(session, history)
 
-    return response.content
+    footer = usage_footer(response) if show_usage else ""
+    return response.content + footer
 
 @mcp.tool(annotations=READONLY)
 async def web_search(
     prompt: str,
-    model: str = "grok-4-1-fast-reasoning",
+    model: str = "grok-4.6",
     allowed_domains: Optional[List[str]] = None,
     excluded_domains: Optional[List[str]] = None,
     enable_image_understanding: bool = False,
+    enable_image_search: bool = False,
     include_inline_citations: bool = False,
-    max_turns: Optional[int] = None
+    max_turns: Optional[int] = None,
+    show_usage: bool = False,
 ):
     """Answer a query using agentic real-time web search.
 
@@ -397,12 +430,14 @@ async def web_search(
 
     Args:
         prompt: Search query or research question.
-        model: Grok model used to drive the agent (default `grok-4-1-fast-reasoning`).
+        model: Grok model used to drive the agent (default `grok-4.6`).
         allowed_domains: Restrict search to these domains (max 5, mutually exclusive with excluded).
         excluded_domains: Exclude these domains from search (max 5).
         enable_image_understanding: Let the agent analyze images it encounters.
+        enable_image_search: Let the agent search for and return image results.
         include_inline_citations: Embed `[1]`-style citation markers into the answer text.
         max_turns: Cap the agent's reasoning/tool turns.
+        show_usage: Append a token usage and cost footer to the answer (default False).
 
     Returns:
         Markdown with the answer body followed by a `**Sources:**` list of cited URLs.
@@ -420,6 +455,7 @@ async def web_search(
         allowed_domains=allowed_domains,
         excluded_domains=excluded_domains,
         enable_image_understanding=enable_image_understanding,
+        enable_image_search=enable_image_search,
     )
     
     include_options = []
@@ -443,13 +479,14 @@ async def web_search(
         result.append("\n\n**Sources:**")
         for url in response.citations:
             result.append(f"- {url}")
-    return "\n".join(result)
+    footer = usage_footer(response) if show_usage else ""
+    return "\n".join(result) + footer
 
 
 @mcp.tool(annotations=READONLY)
 async def x_search(
     prompt: str,
-    model: str = "grok-4-1-fast-reasoning",
+    model: str = "grok-4.6",
     allowed_x_handles: Optional[List[str]] = None,
     excluded_x_handles: Optional[List[str]] = None,
     from_date: Optional[str] = None,
@@ -457,7 +494,8 @@ async def x_search(
     enable_image_understanding: bool = False,
     enable_video_understanding: bool = False,
     include_inline_citations: bool = False,
-    max_turns: Optional[int] = None
+    max_turns: Optional[int] = None,
+    show_usage: bool = False,
 ):
     """Answer a query using agentic search over X (Twitter).
 
@@ -466,7 +504,7 @@ async def x_search(
 
     Args:
         prompt: Search query or question about X content.
-        model: Grok model driving the agent (default `grok-4-1-fast-reasoning`).
+        model: Grok model driving the agent (default `grok-4.6`).
         allowed_x_handles: Restrict search to these handles (max 10, mutually exclusive with excluded).
         excluded_x_handles: Exclude these handles (max 10).
         from_date: Inclusive start date as `DD-MM-YYYY`.
@@ -475,6 +513,7 @@ async def x_search(
         enable_video_understanding: Let the agent analyze videos in posts (X Search only).
         include_inline_citations: Embed `[1]`-style citation markers into the answer.
         max_turns: Cap the agent's reasoning/tool turns.
+        show_usage: Append a token usage and cost footer to the answer (default False).
 
     Returns:
         Markdown with the answer body followed by a `**Sources:**` list of cited posts.
@@ -518,14 +557,16 @@ async def x_search(
         result.append("\n\n**Sources:**")
         for url in response.citations:
             result.append(f"- {url}")
-    return "\n".join(result)
+    footer = usage_footer(response) if show_usage else ""
+    return "\n".join(result) + footer
 
 
 @mcp.tool()
 async def code_executor(
     prompt: str,
-    model: str = "grok-4-1-fast-reasoning",
-    max_turns: Optional[int] = None
+    model: str = "grok-4.6",
+    max_turns: Optional[int] = None,
+    show_usage: bool = False,
 ):
     """Solve a task by letting Grok run Python in a stateful sandbox.
 
@@ -534,8 +575,9 @@ async def code_executor(
 
     Args:
         prompt: Task or question requiring computation.
-        model: Grok model driving the agent (default `grok-4-1-fast-reasoning`).
+        model: Grok model driving the agent (default `grok-4.6`).
         max_turns: Cap the number of reasoning/execution turns.
+        show_usage: Append a token usage and cost footer to the answer (default False).
 
     Returns:
         Markdown with the final answer followed by each code execution block's stdout.
@@ -557,14 +599,15 @@ async def code_executor(
         result.append("\n\n**Code Output(s):**")
         for output in response.tool_outputs:
             result.append(f"```\n{output.message.content}\n```")
-    return "\n".join(result)
+    footer = usage_footer(response) if show_usage else ""
+    return "\n".join(result) + footer
 
 
 @mcp.tool()
 async def grok_agent(
     prompt: str,
     session: Optional[str] = None,
-    model: str = "grok-4-1-fast-reasoning",
+    model: str = "grok-4.6",
     file_ids: Optional[List[str]] = None,
     image_urls: Optional[List[str]] = None,
     image_paths: Optional[List[str]] = None,
@@ -579,10 +622,12 @@ async def grok_agent(
     to_date: Optional[str] = None,
     enable_image_understanding: bool = False,
     enable_video_understanding: bool = False,
+    enable_image_search: bool = False,
     include_inline_citations: bool = False,
     system_prompt: Optional[str] = None,
     max_turns: Optional[int] = None,
     agent_count: Optional[int] = None,
+    show_usage: bool = False,
 ):
     """All-in-one Grok agent combining files, vision, web/X search, and code execution.
 
@@ -593,7 +638,7 @@ async def grok_agent(
     Args:
         prompt: Task or question for the agent.
         session: Optional session name for persistent history in `chats/{session}.json`.
-        model: Grok model driving the agent (default `grok-4-1-fast-reasoning`).
+        model: Grok model driving the agent (default `grok-4.6`).
         file_ids: IDs of previously uploaded files to attach as context.
         image_urls: Public image URLs to attach.
         image_paths: Local image files to attach (sent as base64 data URIs).
@@ -608,10 +653,12 @@ async def grok_agent(
         to_date: X search inclusive end date as `DD-MM-YYYY`.
         enable_image_understanding: Let search tools analyze images they encounter.
         enable_video_understanding: Let X search analyze videos in posts.
+        enable_image_search: Let web search find and return image results.
         include_inline_citations: Embed `[1]`-style citation markers into the answer.
         system_prompt: Optional system instruction prepended to the conversation.
         max_turns: Cap the agent's reasoning/tool turns.
         agent_count: 4 or 16. Only valid with `grok-4.20-multi-agent`.
+        show_usage: Append a token usage and cost footer to the answer (default False).
 
     Returns:
         Markdown with the answer body followed by a `**Sources:**` list when citations exist.
@@ -626,6 +673,7 @@ async def grok_agent(
             allowed_domains=allowed_domains,
             excluded_domains=excluded_domains,
             enable_image_understanding=enable_image_understanding,
+            enable_image_search=enable_image_search,
         )
         tools.append(xai_web_search(**web_params))
     
@@ -697,15 +745,17 @@ async def grok_agent(
         result.append("\n\n**Sources:**")
         for url in response.citations:
             result.append(f"- {url}")
-    return "\n".join(result)
+    footer = usage_footer(response) if show_usage else ""
+    return "\n".join(result) + footer
 
 
 @mcp.tool()
 async def stateful_chat(
     prompt: str,
-    model: str = "grok-4-1-fast-reasoning",
+    model: str = "grok-4.6",
     response_id: Optional[str] = None,
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    show_usage: bool = False,
 ):
     """Continue a server-side stored conversation using xAI's deferred/stateful chat.
 
@@ -714,9 +764,10 @@ async def stateful_chat(
 
     Args:
         prompt: User message to append.
-        model: Grok model id (default `grok-4-1-fast-reasoning`).
+        model: Grok model id (default `grok-4.6`).
         response_id: ID of the previous response to continue from (omit to start fresh).
         system_prompt: Optional system instruction. Applied only on the first turn.
+        show_usage: Append a token usage and cost footer to the reply (default False).
 
     Returns:
         Assistant reply followed by the new `**Response ID:**` to pass back next turn.
@@ -734,8 +785,9 @@ async def stateful_chat(
     
     response = chat.sample()
     client.close()
-    
-    return f"{response.content}\n\n**Response ID:** `{response.id}`"
+
+    footer = usage_footer(response) if show_usage else ""
+    return f"{response.content}\n\n**Response ID:** `{response.id}`" + footer
 
 
 @mcp.tool(annotations=READONLY)
@@ -774,7 +826,7 @@ async def delete_stateful_response(response_id: str):
 
 
 @mcp.tool()
-async def upload_file(file_path: str):
+async def upload_file(file_path: str, expires_after: Optional[int] = None):
     """Upload a local file to xAI so it can be attached to later chats.
 
     Supported types include PDFs and text documents (see xAI file docs). The
@@ -782,6 +834,8 @@ async def upload_file(file_path: str):
 
     Args:
         file_path: Absolute or relative path to the local file.
+        expires_after: Optional TTL in seconds. The file is deleted from xAI
+            automatically once it expires (omit to keep the file indefinitely).
 
     Returns:
         Markdown block with the assigned file ID, filename, and size.
@@ -792,10 +846,17 @@ async def upload_file(file_path: str):
     if not path.exists():
         raise FileNotFoundError(f"File not found {file_path}")
 
-    uploaded = client.files.upload(file_path)
+    upload_params = {}
+    if expires_after:
+        upload_params["expires_after"] = expires_after
+
+    uploaded = client.files.upload(file_path, **upload_params)
     client.close()
-    
-    return f"**File uploaded successfully**\n- **File ID:** `{uploaded.id}`\n- **Filename:** {uploaded.filename}\n- **Size:** {uploaded.size} bytes"
+
+    result = f"**File uploaded successfully**\n- **File ID:** `{uploaded.id}`\n- **Filename:** {uploaded.filename}\n- **Size:** {uploaded.size} bytes"
+    if expires_after:
+        result += f"\n- **Expires after:** {expires_after} seconds"
+    return result
 
 
 @mcp.tool(annotations=READONLY)
@@ -894,8 +955,9 @@ async def chat_with_files(
     prompt: str,
     file_ids: List[str],
     session: Optional[str] = None,
-    model: str = "grok-4-1-fast-reasoning",
-    system_prompt: Optional[str] = None
+    model: str = "grok-4.6",
+    system_prompt: Optional[str] = None,
+    show_usage: bool = False,
 ):
     """Chat with Grok using one or more previously uploaded files as context.
 
@@ -906,8 +968,9 @@ async def chat_with_files(
         prompt: Question or instruction about the attached files.
         file_ids: IDs of files previously returned by `upload_file`.
         session: Optional session name for persistent history in `chats/{session}.json`.
-        model: Grok model id (default `grok-4-1-fast-reasoning`).
+        model: Grok model id (default `grok-4.6`).
         system_prompt: Optional system instruction prepended to the conversation.
+        show_usage: Append a token usage and cost footer to the reply (default False).
 
     Returns:
         Assistant reply, followed by a `**Sources:**` list when the model cites URLs.
@@ -941,7 +1004,8 @@ async def chat_with_files(
         result.append("\n\n**Sources:**")
         for url in response.citations:
             result.append(f"- {url}")
-    return "\n".join(result)
+    footer = usage_footer(response) if show_usage else ""
+    return "\n".join(result) + footer
 
 
 def main():
