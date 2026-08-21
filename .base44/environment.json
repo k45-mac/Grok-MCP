@@ -1,0 +1,12 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "XAI_API_KEY",
+      "description": "xAI API key for Grok models. Obtain from https://console.x.ai. The server starts without it but the tools cannot call Grok until it is set.",
+      "requiredAtBoot": false
+    }
+  ]
+}

@@ -1,9 +1,12 @@
+import os
 import json
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from starlette.requests import Request
+from starlette.responses import HTMLResponse
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant, image, file
 from xai_sdk.tools import web_search as xai_web_search, x_search as xai_x_search, code_execution
@@ -1008,8 +1011,56 @@ async def chat_with_files(
     return "\n".join(result) + footer
 
 
+@mcp.custom_route("/", methods=["GET"])
+async def status_page(request: Request) -> HTMLResponse:
+    """Minimal status page so the server is visible in a browser preview."""
+    tools = await mcp.list_tools()
+    key_status = "configured" if os.getenv("XAI_API_KEY") else "missing"
+    tool_items = "\n".join(
+        f'<li><code>{t.name}</code> — {t.description.splitlines()[0] if t.description else ""}</li>'
+        for t in tools
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grok MCP Server</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }}
+  h1 {{ margin-bottom: .25rem; }}
+  .badge {{ display: inline-block; padding: .15rem .5rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }}
+  .ok {{ background: #16a34a; color: #fff; }}
+  .warn {{ background: #dc2626; color: #fff; }}
+  code {{ background: rgba(127,127,127,.18); padding: .1rem .3rem; border-radius: 4px; }}
+  ul {{ padding-left: 1.25rem; }}
+  .meta {{ color: #888; font-size: .9rem; }}
+</style>
+</head>
+<body>
+  <h1>🤖 Grok MCP Server</h1>
+  <p>Status: <span class="badge {'ok' if key_status == 'configured' else 'warn'}">{key_status}</span>
+     XAI_API_KEY {key_status}</p>
+  <p class="meta">Transport: <code>{os.getenv('MCP_TRANSPORT', 'stdio')}</code> · {len(tools)} tools registered</p>
+  <h2>Available tools</h2>
+  <ul>{tool_items}</ul>
+  <p class="meta">MCP endpoint: <code>/mcp</code></p>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
 def main():
-    mcp.run(transport='stdio')
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(
+            transport=transport,
+            host=os.getenv("MCP_HOST", "0.0.0.0"),
+            port=int(os.getenv("MCP_PORT", "3000")),
+        )
 
 
 if __name__ == "__main__":

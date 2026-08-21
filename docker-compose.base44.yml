@@ -1,0 +1,22 @@
+services:
+  grok-mcp:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - uv-cache:/root/.cache/uv
+    ports:
+      - "3000:3000"
+    environment:
+      - MCP_TRANSPORT=streamable-http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - BASE44_PUBLIC_HOST_SUFFIX
+    env_file:
+      - ./.env.base44-defaults
+      - /run/base44/app.env
+    command: uv sync --frozen --no-dev && uv run python main.py
+    restart: unless-stopped
+
+volumes:
+  uv-cache:
