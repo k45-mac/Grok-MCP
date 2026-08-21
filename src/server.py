@@ -1056,11 +1056,18 @@ def main():
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
-        mcp.run(
-            transport=transport,
-            host=os.getenv("MCP_HOST", "0.0.0.0"),
-            port=int(os.getenv("MCP_PORT", "3000")),
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
+        mcp.settings.port = int(os.getenv("MCP_PORT", "3000"))
+        # The preview is served through an external hostname, so the default
+        # localhost-only DNS-rebinding protection would reject it.
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+            allowed_hosts=["*"],
+            allowed_origins=["*"],
         )
+        mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

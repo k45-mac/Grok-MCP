@@ -15,7 +15,8 @@ services:
     env_file:
       - ./.env.base44-defaults
       - /run/base44/app.env
-    command: uv sync --frozen --no-dev && uv run python main.py
+    entrypoint: ["uv"]
+    command: ["run", "python", "main.py"]
     restart: unless-stopped
 
 volumes:
